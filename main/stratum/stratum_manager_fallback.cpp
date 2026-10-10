@@ -18,7 +18,7 @@ void StratumManagerFallback::reconnectTimerCallback(int index)
 {
     PThreadGuard lock(m_mutex);
 
-    if (isVerifyBlocked(index)) return;
+    if (isBlocked(index)) return;
 
     // failover mode:
     if (index == PRIMARY) {
@@ -26,7 +26,7 @@ void StratumManagerFallback::reconnectTimerCallback(int index)
         m_stratumTasks[index]->connect();
     } else {
         // secondary is only allowed if primary is NOT connected
-        if (!isConnected(PRIMARY) || isVerifyBlocked(PRIMARY)) {
+        if (!isConnected(PRIMARY) || isBlocked(PRIMARY)) {
             m_stratumTasks[index]->connect();
         } else {
             // primary is good, we don't want secondary online
@@ -40,7 +40,7 @@ void StratumManagerFallback::connectedCallback(int index)
     PThreadGuard lock(m_mutex);
 
     // Blocked pool connected (e.g. after manual reconnect) — kick it off immediately
-    if (isVerifyBlocked(index)) {
+    if (isBlocked(index)) {
         m_stratumTasks[index]->disconnect();
         return;
     }
@@ -57,7 +57,7 @@ void StratumManagerFallback::connectedCallback(int index)
         }
     } else { // index == SECONDARY
         // Secondary is up
-        if (!isConnected(PRIMARY) || isVerifyBlocked(PRIMARY)) {
+        if (!isConnected(PRIMARY) || isBlocked(PRIMARY)) {
             // Primary is dead or blocked → accept Secondary as active
             m_selected = SECONDARY;
             m_verificationCheckCount[SECONDARY] = 0;  // fresh start when secondary takes over
@@ -184,6 +184,8 @@ void StratumManagerFallback::getManagerInfoJson(JsonObject &obj, bool verbose) {
         if (verbose) {
             pool["active"] = active;
             pool["verifyBlocked"] = getVerifyBlockedReason(i) ? getVerifyBlockedReason(i) : "";
+            pool["healthBlocked"] = isHealthBlocked(i);
+            pool["lastWorkAge"] = lastWorkAge(i);
             pool["activeProtocol"] = m_stratumConfig[i] ? (int)m_stratumConfig[i]->getProtocol() : 0;
             pool["encrypted"] = m_stratumConfig[i] ? (m_stratumConfig[i]->isSV2() || m_stratumConfig[i]->isTLS()) : false;
         }

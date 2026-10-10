@@ -126,6 +126,8 @@ void StratumManager::task()
         }
         vTaskDelay(pdMS_TO_TICKS(30000));
 
+        checkPoolHealth();
+
         // Reset watchdog if there was a submit response within the last hour
         if (m_lastSubmitResponseTimestamp && ((esp_timer_get_time() - m_lastSubmitResponseTimestamp) / 1000000) < 3600) {
             esp_task_wdt_reset();
@@ -186,6 +188,7 @@ void StratumManager::dispatch(int pool, JsonDocument &doc)
         if (m_stratum_api_v1_message.mining_notification->ntime) {
             m_stratumTasks[pool]->m_validNotify = true;
         }
+        m_lastWorkUs[pool] = esp_timer_get_time();
 
         selected->m_firstJob = false;
         break;
@@ -321,6 +324,7 @@ void StratumManager::loadSettings(bool reconnect)
         m_verificationCheckCount[i] = 0;
         m_verificationFailCount[i] = 0;
         clearVerifyBlocked(i);
+        m_healthBlockedUntilUs[i] = 0;
 
         // reset ping stats
         if (m_pingTasks[i]) {
@@ -590,7 +594,46 @@ void StratumManager::runVerification(int pool)
     }
 }
 
-void StratumManager::getManagerInfoJson(JsonObject &obj, bool /*verbose*/)
+// A pool can stay connected while sending no jobs (e.g. the node behind it lost sync), which
+// leaves the ASICs idle. Keep that pool offline for a while if the other pool can take over,
+// otherwise force a fresh connection.
+void StratumManager::checkPoolHealth()
+{
+    PThreadGuard lock(m_mutex);
+    int64_t now = esp_timer_get_time();
+
+    for (int i = 0; i < 2; i++) {
+        StratumTaskBase *task = m_stratumTasks[i];
+
+        // only pools we currently take work from are expected to send it
+        if (!task || !task->m_isConnected || !acceptsNotifyFrom(i)) {
+            m_lastWorkUs[i] = now;
+            continue;
+        }
+        if (now - m_lastWorkUs[i] < POOL_HEALTH_WORK_STALL_US) {
+            continue;
+        }
+
+        m_lastWorkUs[i] = now;
+        m_healthActions++;
+
+        int other = i ^ 1;
+        bool otherUsable = m_stratumConfig[other] && strlen(m_stratumConfig[other]->getHost()) > 0 && !isBlocked(other);
+        int stallMin = (int) (POOL_HEALTH_WORK_STALL_US / 60000000);
+
+        if (otherUsable) {
+            ESP_LOGW(m_tag, "pool %d sent no new work for %d min, switching to pool %d for %d min", i, stallMin, other,
+                     (int) (POOL_HEALTH_HOLDDOWN_US / 60000000));
+            m_healthBlockedUntilUs[i] = now + POOL_HEALTH_HOLDDOWN_US;
+            task->disconnect();
+        } else {
+            ESP_LOGW(m_tag, "pool %d sent no new work for %d min, reconnecting", i, stallMin);
+        }
+        task->triggerReconnect();
+    }
+}
+
+void StratumManager::getManagerInfoJson(JsonObject &obj, bool verbose)
 {
     obj["poolMode"] = Config::getPoolMode();
     obj["activePoolMode"] = getPoolMode();
@@ -601,6 +644,10 @@ void StratumManager::getManagerInfoJson(JsonObject &obj, bool /*verbose*/)
     obj["poolBalance"] = Config::getPoolBalance();
 
     obj["totalBestDiff"] = m_totalBestDiff;
+
+    if (verbose) {
+        obj["healthActions"] = m_healthActions;
+    }
 }
 
 void StratumManager::checkForFoundBlock(int pool, double diff, uint32_t nbits)

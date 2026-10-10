@@ -20,8 +20,8 @@ void StratumManagerDualPool::reconnectTimerCallback(int index)
 {
     PThreadGuard lock(m_mutex);
 
-    // verify-blocked pool must not reconnect until the block is cleared
-    if (isVerifyBlocked(index)) return;
+    // blocked pool must not reconnect until the block is cleared or expires
+    if (isBlocked(index)) return;
 
     // dual pool: both pools always try to stay alive
     m_stratumTasks[index]->connect();
@@ -32,7 +32,7 @@ void StratumManagerDualPool::connectedCallback(int index)
     PThreadGuard lock(m_mutex);
 
     // Blocked pool connected (e.g. after settings save) — kick it off immediately
-    if (isVerifyBlocked(index)) {
+    if (isBlocked(index)) {
         m_stratumTasks[index]->disconnect();
         return;
     }
@@ -56,8 +56,8 @@ int StratumManagerDualPool::getNextActivePool()
     PThreadGuard lock(m_mutex);
     int secondary_pct = 100 - m_balance;
 
-    bool valid0 = m_stratumTasks[0] && m_stratumTasks[0]->m_validNotify && !isVerifyBlocked(0);
-    bool valid1 = m_stratumTasks[1] && m_stratumTasks[1]->m_validNotify && !isVerifyBlocked(1);
+    bool valid0 = m_stratumTasks[0] && m_stratumTasks[0]->m_validNotify && !isBlocked(0);
+    bool valid1 = m_stratumTasks[1] && m_stratumTasks[1]->m_validNotify && !isBlocked(1);
 
     // fast paths: only one pool has valid work
     if (valid0 && !valid1) {
@@ -235,6 +235,8 @@ void StratumManagerDualPool::getManagerInfoJson(JsonObject &obj, bool verbose)
         if (verbose) {
             pool["active"] = true; // dual pool mode: both pools mine
             pool["verifyBlocked"] = getVerifyBlockedReason(i) ? getVerifyBlockedReason(i) : "";
+            pool["healthBlocked"] = isHealthBlocked(i);
+            pool["lastWorkAge"] = lastWorkAge(i);
             pool["activeProtocol"] = m_stratumConfig[i] ? (int)m_stratumConfig[i]->getProtocol() : 0;
             pool["encrypted"] = m_stratumConfig[i] ? (m_stratumConfig[i]->isSV2() || m_stratumConfig[i]->isTLS()) : false;
         }
