@@ -5,6 +5,7 @@
 #include "freertos/timers.h"
 #include "lwip/inet.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "ArduinoJson.h"
 
 #include "coinbase_decoder.h"
@@ -12,6 +13,12 @@
 #include "../tasks/ping_task.h"
 
 #define DIFF_STRING_SIZE 12
+
+// A connected pool that sends no new job for this long is treated as unhealthy
+// (e.g. its node lost sync but the connection stays open).
+#define POOL_HEALTH_WORK_STALL_US (10LL * 60 * 1000000)
+// How long an unhealthy pool is kept offline while the other pool takes over.
+#define POOL_HEALTH_HOLDDOWN_US (15LL * 60 * 1000000)
 
 /**
  * @brief StratumManager handles pool selection, connection management, and failover.
@@ -68,6 +75,19 @@ class StratumManager {
     uint32_t m_verificationCheckCount[2]{};
     // "" = not blocked, "address_not_found", "fee_exceeded"
     const char *m_verifyBlockedReason[2]{nullptr, nullptr};
+
+    // Pool health: last new job per pool and hold-down after a health failover
+    int64_t m_lastWorkUs[2]{};
+    int64_t m_healthBlockedUntilUs[2]{};
+    uint32_t m_healthActions = 0;
+
+    void checkPoolHealth();
+
+    // called by protocol tasks that don't go through dispatch() (SV2)
+    void noteWork(int pool) {
+        PThreadGuard lock(m_mutex);
+        m_lastWorkUs[pool & 1] = esp_timer_get_time();
+    }
 
     void processCoinbase(int pool, const mining_notify *notify);
     void processCoinbase(int pool, const char *coinbase_1_hex, const char *coinbase_2_hex,
@@ -244,6 +264,15 @@ class StratumManager {
 
     bool isVerifyBlocked(int pool) const { return m_verifyBlockedReason[pool & 1] != nullptr; }
     const char *getVerifyBlockedReason(int pool) const { return m_verifyBlockedReason[pool & 1]; }
+    bool isHealthBlocked(int pool) const { return esp_timer_get_time() < m_healthBlockedUntilUs[pool & 1]; }
+    // a blocked pool must not reconnect or receive work
+    bool isBlocked(int pool) const { return isVerifyBlocked(pool) || isHealthBlocked(pool); }
+    // seconds since the pool sent new work, -1 when not connected (call with m_mutex held)
+    int lastWorkAge(int pool) const {
+        StratumTaskBase *task = m_stratumTasks[pool & 1];
+        if (!task || !task->m_isConnected) return -1;
+        return (int) ((esp_timer_get_time() - m_lastWorkUs[pool & 1]) / 1000000);
+    }
 
     void clearVerifyBlocked(int pool) {
         m_verifyBlockedReason[pool & 1] = nullptr;

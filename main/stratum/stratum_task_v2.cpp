@@ -434,6 +434,7 @@ void StratumTaskV2::handleNewMiningJob(const uint8_t *payload, uint32_t len)
 
     ESP_LOGI(m_tag, "New mining job: id=%lu, version=%08lx, future=%s",
              (unsigned long)job_id, (unsigned long)version, has_min_ntime ? "no" : "yes");
+    m_manager->noteWork(m_index);
 
     int slot = job_id % SV2_PENDING_JOBS_SIZE;
 
@@ -467,6 +468,7 @@ void StratumTaskV2::handleNewExtendedMiningJob(const uint8_t *payload, uint32_t 
 
     ESP_LOGI(m_tag, "New extended mining job: id=%lu, version=%08lx, merkle_branches=%d",
              (unsigned long)job->job_id, (unsigned long)job->version, job->merkle_path_count);
+    m_manager->noteWork(m_index);
 
     // Spec 5.3.16: without version_rolling_allowed the version must be used
     // as sent. The ASICs roll it regardless, so every share would be invalid.
@@ -624,6 +626,7 @@ void StratumTaskV2::handleSetNewPrevHash(const uint8_t *payload, uint32_t len)
 
     // Mark that we have a valid notify (used by manager for pool selection)
     m_validNotify = true;
+    m_manager->noteWork(m_index);
 }
 
 void StratumTaskV2::handleSetTarget(const uint8_t *payload, uint32_t len)
